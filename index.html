@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Retro Play</title>
+<script src="coi-serviceworker.js"></script>
+<style>
+  :root { color-scheme: dark; --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --fg:#e8eaf0; --mute:#8b93a5; --acc:#7c5cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:1.6rem; margin:0 0 4px; }
+  p.sub { color:var(--mute); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; margin-bottom:16px; }
+  label { display:block; font-size:.85rem; color:var(--mute); margin:0 0 6px; }
+  select, input[type=file], button { width:100%; font:inherit; color:var(--fg); background:#10131a; border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  button { cursor:pointer; background:var(--acc); border-color:var(--acc); font-weight:600; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.ghost { background:transparent; border-color:var(--line); font-weight:500; }
+  .row { margin-bottom:14px; }
+  .hint { font-size:.8rem; color:var(--mute); margin-top:6px; }
+  .warn { font-size:.8rem; color:#e0b45c; margin-top:6px; }
+  #stage { display:none; }
+  #game { width:100%; aspect-ratio:4/3; max-height:78vh; background:#000; border-radius:12px; overflow:hidden; }
+  .bar { display:flex; gap:8px; margin-top:10px; }
+  .bar button { width:auto; flex:1; }
+  details summary { cursor:pointer; color:var(--mute); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Retro Play</h1>
+  <p class="sub">System wählen, ROM öffnen, spielen. Alles läuft lokal in deinem Browser, nichts wird hochgeladen.</p>
+
+  <div id="setup" class="card">
+    <div class="row">
+      <label for="system">System</label>
+      <select id="system"></select>
+    </div>
+    <div class="row">
+      <label for="rom">ROM / Spieldatei</label>
+      <input id="rom" type="file">
+      <div id="detect" class="hint"></div>
+      <div id="sysnote" class="warn"></div>
+    </div>
+    <details class="row">
+      <summary>BIOS-Datei (optional, nötig für Saturn, Sega CD, 3DO u. a.)</summary>
+      <div style="margin-top:10px"><input id="bios" type="file"></div>
+      <div class="hint">PS1 läuft auch ohne BIOS (HLE), mit BIOS aber kompatibler.</div>
+    </details>
+    <button id="start" disabled>Spiel starten</button>
+  </div>
+
+  <div id="stage" class="card">
+    <div id="game"></div>
+    <div class="bar">
+      <button class="ghost" id="fs">Vollbild</button>
+      <button class="ghost" id="again">Anderes Spiel</button>
+    </div>
+    <div class="hint">Spielstände liegen im Browser (IndexedDB). Im Emulator-Menü kannst du Saves als Datei exportieren und wieder laden, das dient als Backup.</div>
+  </div>
+
+  <p class="hint">Nur eigene, selbst gesicherte Spiele verwenden. Diese Seite enthält keine ROMs und keine BIOS-Dateien.</p>
+</div>
+
+<script>
+// core = EmulatorJS-Core-Name, ext = typische Dateiendungen, note = Hinweis
+const SYSTEMS = [
+  { id:"nes",        name:"Nintendo NES / Famicom",      core:"nes",        ext:["nes","fds","unf"] },
+  { id:"snes",       name:"Super Nintendo (SNES)",       core:"snes",       ext:["sfc","smc","fig","swc"] },
+  { id:"gb",         name:"Game Boy / Game Boy Color",   core:"gb",         ext:["gb","gbc"] },
+  { id:"gba",        name:"Game Boy Advance",            core:"gba",        ext:["gba"] },
+  { id:"n64",        name:"Nintendo 64",                 core:"n64",        ext:["n64","z64","v64"], note:"N64 ist je nach Gerät anspruchsvoll." },
+  { id:"nds",        name:"Nintendo DS",                 core:"nds",        ext:["nds"], note:"DS läuft am besten auf einem Desktop-Rechner." },
+  { id:"vb",         name:"Virtual Boy",                 core:"vb",         ext:["vb","vboy"] },
+  { id:"psx",        name:"Sony PlayStation (PS1)",      core:"psx",        ext:["cue","bin","iso","img","chd","pbp","m3u"], note:"Bei Cue/Bin am besten .cue oder ein einzelnes .chd/.iso wählen." },
+  { id:"psp",        name:"Sony PSP",                    core:"psp",        ext:["iso","cso","pbp"], note:"PSP ist sehr rechenintensiv, nur auf starken Geräten sinnvoll." },
+  { id:"ps2",        name:"Sony PlayStation 2 (PS2)",    core:null,         ext:[], unsupported:"PS2 lässt sich im Browser derzeit nicht brauchbar emulieren: Es gibt keinen praxistauglichen PS2-Core für WebAssembly. Dafür bräuchtest du PCSX2 oder AetherSX2/NetherSX2 lokal." },
+  { id:"md",         name:"Sega Mega Drive / Genesis",   core:"segaMD",     ext:["md","gen","smd","bin"] },
+  { id:"sms",        name:"Sega Master System",          core:"segaMS",     ext:["sms"] },
+  { id:"gg",         name:"Sega Game Gear",              core:"segaGG",     ext:["gg"] },
+  { id:"scd",        name:"Sega CD / Mega-CD",           core:"segaCD",     ext:["cue","iso","chd"], note:"Braucht in der Regel eine BIOS-Datei." },
+  { id:"32x",        name:"Sega 32X",                    core:"sega32x",    ext:["32x"] },
+  { id:"saturn",     name:"Sega Saturn",                 core:"segaSaturn", ext:["cue","iso","chd"], note:"Braucht eine BIOS-Datei und ist teils langsam." },
+  { id:"2600",       name:"Atari 2600",                  core:"atari2600",  ext:["a26"] },
+  { id:"5200",       name:"Atari 5200",                  core:"a5200",      ext:["a52"] },
+  { id:"7800",       name:"Atari 7800",                  core:"atari7800",  ext:["a78"] },
+  { id:"lynx",       name:"Atari Lynx",                  core:"lynx",       ext:["lnx"] },
+  { id:"jaguar",     name:"Atari Jaguar",                core:"jaguar",     ext:["j64","jag"] },
+  { id:"pce",        name:"PC Engine / TurboGrafx-16",   core:"pce",        ext:["pce","sgx"] },
+  { id:"ngp",        name:"Neo Geo Pocket",              core:"ngp",        ext:["ngp","ngc"] },
+  { id:"ws",         name:"WonderSwan",                  core:"ws",         ext:["ws","wsc"] },
+  { id:"coleco",     name:"ColecoVision",                core:"coleco",     ext:["col"] },
+  { id:"3do",        name:"3DO",                         core:"3do",        ext:["iso","cue"], note:"Braucht eine BIOS-Datei." },
+  { id:"arcade",     name:"Arcade (FBNeo: Neo Geo, CPS …)", core:"arcade",  ext:["zip"], note:"ZIP unverändert auswählen, ROM-Set muss zur Core-Version passen." },
+  { id:"mame",       name:"Arcade (MAME 2003)",          core:"mame2003",   ext:["zip"], note:"ZIP unverändert auswählen." },
+  { id:"c64",        name:"Commodore 64",                core:"vice_x64sc", ext:["d64","t64","prg","crt","tap","x64"] },
+  { id:"amiga",      name:"Commodore Amiga",             core:"amiga",      ext:["adf","ipf","lha","hdf"] },
+  { id:"dos",        name:"DOS (DOSBox Pure)",           core:"dos",        ext:["zip","dosz"], note:"Spiel als ZIP bereitstellen." },
+];
+
+const $ = id => document.getElementById(id);
+const sel = $("system"), rom = $("rom"), bios = $("bios"), start = $("start");
+
+SYSTEMS.forEach(s => {
+  const o = document.createElement("option");
+  o.value = s.id;
+  o.textContent = s.name + (s.core ? "" : " (nicht möglich)");
+  sel.appendChild(o);
+});
+
+function cur() { return SYSTEMS.find(s => s.id === sel.value); }
+function extOf(f) { return (f.name.split(".").pop() || "").toLowerCase(); }
+
+function refresh() {
+  const s = cur();
+  $("sysnote").textContent = s.unsupported || s.note || "";
+  start.disabled = !(s.core && rom.files[0]);
+  const f = rom.files[0];
+  $("detect").textContent = "";
+  if (f && s.core && s.ext.length && !s.ext.includes(extOf(f))) {
+    const guess = SYSTEMS.find(x => x.core && x.ext.includes(extOf(f)));
+    $("detect").textContent = guess
+      ? `Die Endung .${extOf(f)} passt eher zu „${guess.name}“.`
+      : `Die Endung .${extOf(f)} ist für dieses System ungewöhnlich.`;
+  }
+}
+
+sel.addEventListener("change", refresh);
+rom.addEventListener("change", () => {
+  const f = rom.files[0];
+  if (f) {
+    const e = extOf(f);
+    const unique = SYSTEMS.filter(x => x.core && x.ext.includes(e));
+    // Nur automatisch umstellen, wenn die Endung eindeutig ist
+    if (unique.length === 1) sel.value = unique[0].id;
+  }
+  refresh();
+});
+
+start.addEventListener("click", () => {
+  const s = cur(), f = rom.files[0];
+  if (!s.core || !f) return;
+  $("setup").style.display = "none";
+  $("stage").style.display = "block";
+
+  window.EJS_player = "#game";
+  window.EJS_core = s.core;
+  window.EJS_gameName = f.name.replace(/\.[^.]+$/, "");
+  window.EJS_gameUrl = URL.createObjectURL(f);
+  window.EJS_pathtodata = "https://cdn.emulatorjs.org/stable/data/";
+  window.EJS_startOnLoaded = true;
+  window.EJS_color = "#7c5cff";
+  if (bios.files[0]) window.EJS_biosUrl = URL.createObjectURL(bios.files[0]);
+
+  const sc = document.createElement("script");
+  sc.src = window.EJS_pathtodata + "loader.js";
+  document.body.appendChild(sc);
+});
+
+$("fs").addEventListener("click", () => {
+  const el = $("game");
+  (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el);
+});
+$("again").addEventListener("click", () => location.reload());
+
+refresh();
+</script>
+</body>
+</html>
